@@ -71,9 +71,9 @@ export default function ReviewStep({
     update({ keyStrengths: arr });
   };
 
-  // Notes
-  const updateNote = (i, field, v) => {
-    const arr = candidateData.consultantNotes.map((n, idx) => idx === i ? { ...n, [field]: v } : n);
+  // Notes — now flat strings
+  const updateNote = (i, v) => {
+    const arr = candidateData.consultantNotes.map((n, idx) => idx === i ? v : n);
     update({ consultantNotes: arr });
   };
 
@@ -140,16 +140,6 @@ export default function ReviewStep({
             <Field label="EU Work Rights" value={candidateData.euWorkRights} onChange={(v) => update({ euWorkRights: v })} placeholder="EU Citizen / Stamp 4 / etc." />
             <Field label="Education" value={candidateData.education} onChange={(v) => update({ education: v })} placeholder="Highest qualification + institution" className="col-span-2" />
           </div>
-        </SectionCard>
-
-        {/* ── Professional Summary ────────────────────────────────────── */}
-        <SectionCard title="Professional Summary">
-          <TextArea
-            value={candidateData.professionalSummary}
-            onChange={(v) => update({ professionalSummary: v })}
-            placeholder="2–3 sentences, third person, compelling overview of the candidate"
-            rows={4}
-          />
         </SectionCard>
 
         {/* ── Sector Experience ───────────────────────────────────────── */}
@@ -254,43 +244,37 @@ export default function ReviewStep({
         </SectionCard>
 
         {/* ── Consultant Notes ─────────────────────────────────────────── */}
-        <SectionCard title="Consultant Interview Notes">
+        <SectionCard title="Consultant Interview Highlights">
           <p style={{ fontSize: 12, color: "var(--ng-grey-md)", marginBottom: 14 }}>
-            5 bullets — bold headline + supporting detail. Lead with the strongest point.
+            5–6 punchy highlights from the interview — qualitative insights a hiring manager would value. Do not repeat salary, notice period or motivation (those have their own fields).
           </p>
-          <div className="space-y-4">
-            {candidateData.consultantNotes.map((note, i) => (
-              <div key={i} className="note-row">
-                <div className="note-num">{i + 1}</div>
-                <div style={{ flex: 1 }} className="space-y-3">
+          <div className="space-y-3">
+            {candidateData.consultantNotes.map((note, i) => {
+              const val = typeof note === "string" ? note : (note.detail || note.headline || "");
+              return (
+                <div key={i} className="strength-row">
+                  <span className="strength-bullet" style={{ color: "var(--ng-gold)", fontSize: 14 }}>·</span>
                   <input
                     className="field-input"
                     type="text"
-                    value={note.headline}
-                    onChange={(e) => updateNote(i, "headline", e.target.value)}
-                    placeholder="Bold headline (max 8 words)"
-                    style={{ fontWeight: 600 }}
+                    value={val}
+                    onChange={(e) => updateNote(i, e.target.value)}
+                    placeholder="e.g. Candidate demonstrated exceptional stakeholder management in a regulated environment"
+                    style={{ flex: 1 }}
                   />
-                  <textarea
-                    className="field-textarea"
-                    rows={2}
-                    value={note.detail}
-                    onChange={(e) => updateNote(i, "detail", e.target.value)}
-                    placeholder="Supporting detail — include numbers and specifics"
-                  />
+                  <button
+                    className="btn-ghost"
+                    onClick={() => update({ consultantNotes: candidateData.consultantNotes.filter((_, idx) => idx !== i) })}
+                    style={{ color: "var(--ng-grey-md)", fontSize: 18, padding: "4px 8px" }}
+                  >×</button>
                 </div>
-                <button
-                  className="btn-ghost"
-                  onClick={() => update({ consultantNotes: candidateData.consultantNotes.filter((_, idx) => idx !== i) })}
-                  style={{ fontSize: 18, padding: "4px 8px", alignSelf: "flex-start", marginTop: 8 }}
-                >×</button>
-              </div>
-            ))}
+              );
+            })}
           </div>
           <button
             className="btn btn-ghost mt-3"
-            onClick={() => update({ consultantNotes: [...candidateData.consultantNotes, { headline: "", detail: "" }] })}
-          >+ Add note</button>
+            onClick={() => update({ consultantNotes: [...candidateData.consultantNotes, ""] })}
+          >+ Add highlight</button>
         </SectionCard>
 
         {/* ── Salary warning ───────────────────────────────────────────── */}
