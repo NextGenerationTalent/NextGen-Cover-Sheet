@@ -124,10 +124,13 @@ function drawInfoCluster(page, boxes, y, fontBold, fontReg, W, M) {
 
   boxes.forEach((box, i) => {
     const bx = M + i * boxW;
-    // Background alternating for subtle depth
-    const bg = i % 2 === 0 ? LIGHT_BG : rgb(0.94, 0.94, 0.94);
-    page.drawRectangle({ x: bx, y: boxY, width: boxW, height: BOX_H, color: bg });
-    page.drawRectangle({ x: bx, y: boxY, width: boxW, height: BOX_H, color: rgb(0,0,0,0), borderColor: RULE, borderWidth: 0.6 });
+    // Gold/cream background matching package strips
+    page.drawRectangle({ x: bx, y: boxY, width: boxW, height: BOX_H, color: CHIP_BG });
+    // Vertical divider in gold
+    if (i > 0) {
+      page.drawRectangle({ x: bx, y: boxY, width: 0.5, height: BOX_H, color: GOLD });
+    }
+    page.drawRectangle({ x: bx, y: boxY, width: boxW, height: BOX_H, color: rgb(0,0,0,0), borderColor: GOLD, borderWidth: 0.6 });
 
     const cx = bx + 10;
     sd(page, box.label.toUpperCase(), {
@@ -136,7 +139,7 @@ function drawInfoCluster(page, boxes, y, fontBold, fontReg, W, M) {
     });
 
     const val = box.value && box.value.trim() ? stripMd(box.value) : "—";
-    const valColor = val === "—" ? MID_GREY : DARK_GREY;
+    const valColor = val === "—" ? MID_GREY : BLACK;
     const maxW = boxW - 20;
     const vLines = wrap(val, fontReg, 8, maxW);
     let ty = boxY + BOX_H - 26;
