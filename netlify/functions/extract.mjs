@@ -1,14 +1,6 @@
 // Netlify Function: /api/extract
 // Accepts multipart form data: cv (file), notes, roleTitle, client, consultant
 // Returns: { candidateData, cvBase64, cvMimeType, cvOriginalName }
-//
-// TWO-PASS ARCHITECTURE:
-//   Pass 1 — notes-only call  → salary, package, notice, availability, motivation, consultant notes
-//   Pass 2 — CV-only call     → name, headline, location, education, sector, strengths
-//   Merge both results into final candidateData object.
-//
-// This guarantees Claude cannot pull salary/package data from the CV because
-// the CV is physically absent from Pass 1.
 
 import { Buffer } from "buffer";
 
@@ -28,46 +20,55 @@ function parseMultipart(body, contentType) {
   const fields = {};
   let file = null;
 
+  // Split on boundary
   const startBoundary = Buffer.from(`--${boundary}\r\n`);
   let pos = buf.indexOf(startBoundary);
   if (pos === -1) throw new Error("Could not find start boundary");
   pos += startBoundary.length;
 
   while (pos < buf.length) {
+    // Find end of this part's headers
     const headerEnd = buf.indexOf(Buffer.from("\r\n\r\n"), pos);
     if (headerEnd === -1) break;
 
     const headerStr = buf.slice(pos, headerEnd).toString("utf8");
     const bodyStart = headerEnd + 4;
 
+    // Find next boundary
     let bodyEnd = buf.indexOf(delimiter, bodyStart);
-    if (bodyEnd === -1) bodyEnd = buf.indexOf(closeDelimiter, bodyStart);
+    if (bodyEnd === -1) {
+      bodyEnd = buf.indexOf(closeDelimiter, bodyStart);
+    }
     if (bodyEnd === -1) bodyEnd = buf.length;
 
     const partBody = buf.slice(bodyStart, bodyEnd);
 
+    // Parse headers
     const dispositionMatch = headerStr.match(/Content-Disposition:[^\r\n]*name="([^"]+)"/i);
-    const filenameMatch    = headerStr.match(/Content-Disposition:[^\r\n]*filename="([^"]+)"/i);
-    const mimeMatch        = headerStr.match(/Content-Type:\s*([^\r\n]+)/i);
+    const filenameMatch = headerStr.match(/Content-Disposition:[^\r\n]*filename="([^"]+)"/i);
+    const mimeMatch = headerStr.match(/Content-Type:\s*([^\r\n]+)/i);
 
     if (dispositionMatch) {
       const name = dispositionMatch[1];
       if (filenameMatch) {
+        // File field
         file = {
-          fieldname:    name,
+          fieldname: name,
           originalname: filenameMatch[1],
-          mimetype:     mimeMatch ? mimeMatch[1].trim() : "application/octet-stream",
-          buffer:       partBody,
-          size:         partBody.length,
+          mimetype: mimeMatch ? mimeMatch[1].trim() : "application/octet-stream",
+          buffer: partBody,
+          size: partBody.length,
         };
       } else {
+        // Text field
         fields[name] = partBody.toString("utf8");
       }
     }
 
+    // Advance past delimiter
     pos = bodyEnd + delimiter.length;
     if (buf.slice(bodyEnd, bodyEnd + closeDelimiter.length).equals(closeDelimiter)) break;
-    pos += 2;
+    pos += 2; // skip \r\n after boundary
   }
 
   return { fields, file };
@@ -83,25 +84,123 @@ async function extractTextFromPDF(buffer) {
 
 async function extractTextFromWord(buffer) {
   const mammoth = await import("mammoth");
-  const result  = await mammoth.extractRawText({ buffer });
+  const result = await mammoth.extractRawText({ buffer });
   return result.value || "";
 }
 
-// ─── Claude API helper ────────────────────────────────────────────────────────
+// ─── LLM extraction ───────────────────────────────────────────────────────────
 
-async function callClaude(systemPrompt, userMessage, apiKey) {
+const SYSTEM_PROMPT = `You are a recruitment data extraction engine. Output ONLY a raw JSON object — no markdown, no explanation, no code fences.
+
+CRITICAL RULES:
+
+RULE 1 — SALARY & PACKAGE (MANDATORY):
+The RECRUITER NOTES are the ONLY valid source for every salary and package field.
+You MUST extract salary data from the RECRUITER NOTES section.
+You MUST NOT use the CV for salary, package, or compensation data under any circumstances.
+If the recruiter notes contain a base salary figure, you MUST put it in currentBase.
+If the recruiter notes contain a bonus, you MUST put it in currentBonus.
+If the recruiter notes contain a pension, you MUST put it in currentPension.
+If the recruiter notes contain health insurance, you MUST put it in currentHealth.
+If the recruiter notes contain a car allowance, you MUST put it in currentCar.
+If the recruiter notes contain annual leave, you MUST put it in currentLeave.
+If the recruiter notes contain a total package figure, you MUST put it in currentOther.
+If the recruiter notes contain a target salary, you MUST put it in targetSalary.
+Leaving any of these fields blank when the data exists in the notes is a critical failure.
+
+RULE 2 — KEY STRENGTHS (MANDATORY):
+Return exactly 5 non-empty strings in keyStrengths.
+Extract from the CV work history. Never return fewer than 5.
+
+RULE 3 — CONSULTANT NOTES (MANDATORY):
+These 5 bullets are written BY the recruiter FOR the hiring manager.
+Base them ONLY on the RECRUITER NOTES — what the recruiter learned in the interview.
+Do NOT mention any CV/notes mismatch. Do NOT flag discrepancies between CV and notes.
+Write 5 professional third-person observations covering:
+(1) candidate's strongest selling point from the notes
+(2) current salary and package from the notes
+(3) notice period and availability from the notes
+(4) motivation for move from the notes
+(5) one practical consideration for the hiring manager
+
+RULE 4 — MOTIVATION FOR MOVE:
+Write this from the recruiter's perspective based on the notes, referencing the client and role.
+
+RULE 5 — CV FIELDS:
+Use the CV ONLY for: name, headline, location, education, work history, sector experience, key strengths, EU work rights, professional summary.`;
+
+async function extractWithLLM(cvText, notes, roleTitle, client) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not set in environment variables.");
+
+  const hasNotes = notes && notes.trim().length > 10;
+
+  const userMessage = `ROLE: ${roleTitle || "Not specified"}
+CLIENT: ${client || "Not specified"}
+
+=== RECRUITER INTERVIEW NOTES ===
+IMPORTANT: Read these notes carefully FIRST. Every salary, package, notice period, availability, motivation, and consultant observation MUST come from here.
+${hasNotes ? notes : "(No recruiter notes provided — salary fields should be left blank)"}
+=== END RECRUITER NOTES ===
+
+Now extract the following from the RECRUITER NOTES above:
+- currentBase: base salary (e.g. "€92,000") — MUST come from notes
+- currentBonus: bonus (e.g. "12% annual bonus") — MUST come from notes
+- currentPension: pension (e.g. "7% employer contribution") — MUST come from notes
+- currentHealth: health insurance (e.g. "Private healthcare, family cover") — MUST come from notes
+- currentCar: car/allowance (e.g. "€8,000 car allowance") — MUST come from notes
+- currentLeave: annual leave (e.g. "25 days") — MUST come from notes
+- currentOther: total package or other benefits — MUST come from notes
+- targetSalary: target salary range — MUST come from notes
+- targetNotes: max 8 words on flexibility — MUST come from notes
+- noticePeriod: notice period — MUST come from notes
+- interviewAvailability: interview availability — MUST come from notes
+- motivationForMove: why moving, referencing ${client || "the client"} and the ${roleTitle || "role"} — MUST come from notes
+- consultantNotes: 5 bullets from recruiter perspective — MUST come from notes, NOT the CV
+
+=== CV TEXT ===
+Use the CV ONLY for: name, headline, location, euWorkRights, education, professionalSummary, sectorExperience, keyStrengths.
+Do NOT use the CV for any salary, package, or compensation data.
+${cvText}
+=== END CV ===
+
+Return ONLY this JSON object, no other text:
+{
+  "name": "",
+  "headline": "",
+  "location": "",
+  "euWorkRights": "",
+  "education": "",
+  "professionalSummary": "",
+  "sectorExperience": [],
+  "keyStrengths": [],
+  "currentBase": "",
+  "currentBonus": "",
+  "currentPension": "",
+  "currentHealth": "",
+  "currentCar": "",
+  "currentLeave": "",
+  "currentOther": "",
+  "targetSalary": "",
+  "targetNotes": "",
+  "noticePeriod": "",
+  "interviewAvailability": "",
+  "motivationForMove": "",
+  "consultantNotes": [{"headline": "", "detail": ""}]
+}`;
+
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
-      "Content-Type":    "application/json",
-      "x-api-key":       apiKey,
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model:      "claude-sonnet-4-6",
+      model: "claude-sonnet-4-6",
       max_tokens: 4096,
-      system:     systemPrompt,
-      messages:   [{ role: "user", content: userMessage }],
+      system: SYSTEM_PROMPT,
+      messages: [{ role: "user", content: userMessage }],
     }),
   });
 
@@ -110,158 +209,15 @@ async function callClaude(systemPrompt, userMessage, apiKey) {
     throw new Error(`Claude API error ${response.status}: ${err}`);
   }
 
-  const result  = await response.json();
+  const result = await response.json();
   const content = result.content?.[0]?.text;
   if (!content) throw new Error("Claude returned empty response");
 
+  // Extract JSON from response (Claude may wrap it in markdown)
   const jsonMatch = content.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error("Could not parse JSON from Claude response. Click Extract again.");
 
   return JSON.parse(jsonMatch[0]);
-}
-
-// ─── PASS 1: Extract from interview notes ONLY ────────────────────────────────
-// The CV is NOT sent in this call. Claude cannot fall back to CV data.
-
-async function extractFromNotes(notes, roleTitle, client, apiKey) {
-  const systemPrompt = `You are a recruitment assistant extracting structured data from a recruiter's interview notes.
-Output ONLY a raw JSON object — no markdown, no explanation, no code fences.
-Your ONLY source is the interview notes provided. Do not invent or assume any data not present in the notes.
-If a piece of information is not mentioned in the notes, return an empty string "" for that field.`;
-
-  const userMessage = `ROLE: ${roleTitle || "Not specified"}
-CLIENT: ${client || "Not specified"}
-
-RECRUITER INTERVIEW NOTES:
-${notes.trim() || "(No notes provided)"}
-
-Extract the following fields from the notes above. Return empty string "" for anything not mentioned.
-
-{
-  "currentBase": "candidate's current base salary (e.g. '€92,000')",
-  "currentBonus": "bonus details (e.g. '12% annual bonus')",
-  "currentPension": "pension details (e.g. '7% employer contribution')",
-  "currentHealth": "health insurance (e.g. 'Private healthcare, family cover')",
-  "currentCar": "car or car allowance (e.g. '€8,000 car allowance')",
-  "currentLeave": "annual leave (e.g. '25 days')",
-  "currentOther": "total package value or other notable benefits",
-  "targetSalary": "candidate's target or desired salary range",
-  "targetNotes": "brief note on salary flexibility — max 8 words",
-  "noticePeriod": "notice period (e.g. '3 months')",
-  "interviewAvailability": "when candidate is available for interview",
-  "motivationForMove": "why the candidate wants to move, referencing ${client || "the client"} and the ${roleTitle || "role"} where relevant",
-  "consultantNotes": [
-    {"headline": "Strongest selling point", "detail": "one sentence from the recruiter's perspective based on the notes"},
-    {"headline": "Current salary and package", "detail": "summarise the full package from the notes"},
-    {"headline": "Notice period and availability", "detail": "from the notes"},
-    {"headline": "Motivation for move", "detail": "from the notes"},
-    {"headline": "Practical consideration", "detail": "one useful observation for the hiring manager based on the notes"}
-  ]
-}
-
-Return ONLY the JSON object above, populated from the notes. No other text.`;
-
-  return callClaude(systemPrompt, userMessage, apiKey);
-}
-
-// ─── PASS 2: Extract from CV ONLY ─────────────────────────────────────────────
-// Interview notes are NOT sent in this call.
-
-async function extractFromCV(cvText, roleTitle, client, apiKey) {
-  const systemPrompt = `You are a recruitment assistant extracting structured candidate profile data from a CV.
-Output ONLY a raw JSON object — no markdown, no explanation, no code fences.
-Your ONLY source is the CV text provided. Do not invent or assume data not present in the CV.`;
-
-  const userMessage = `ROLE: ${roleTitle || "Not specified"}
-CLIENT: ${client || "Not specified"}
-
-CV TEXT:
-${cvText}
-
-Extract the following fields from the CV above. Return empty string "" for anything not found.
-
-{
-  "name": "candidate's full name",
-  "headline": "professional headline or current job title — max 10 words",
-  "location": "candidate's location (city/country)",
-  "euWorkRights": "EU work rights status (e.g. 'Irish Citizen', 'EU National', 'Stamp 4')",
-  "education": "highest or most relevant qualification",
-  "professionalSummary": "2–3 sentence professional summary written in third person",
-  "sectorExperience": ["sector or industry 1", "sector or industry 2", "sector or industry 3"],
-  "keyStrengths": [
-    "strength 1 — specific skill or achievement from work history",
-    "strength 2 — specific skill or achievement from work history",
-    "strength 3 — specific skill or achievement from work history",
-    "strength 4 — specific skill or achievement from work history",
-    "strength 5 — specific skill or achievement from work history"
-  ]
-}
-
-Rules:
-- keyStrengths MUST contain exactly 5 non-empty strings drawn from the CV work history.
-- sectorExperience should list 2–5 industries or sectors the candidate has worked in.
-- professionalSummary should be written as a recruiter would describe the candidate.
-
-Return ONLY the JSON object above. No other text.`;
-
-  return callClaude(systemPrompt, userMessage, apiKey);
-}
-
-// ─── Main extraction orchestrator ────────────────────────────────────────────
-
-async function extractWithTwoPass(cvText, notes, roleTitle, client, apiKey) {
-  const hasNotes = notes && notes.trim().length > 10;
-
-  // Run both passes in parallel for speed
-  const [notesData, cvData] = await Promise.all([
-    hasNotes
-      ? extractFromNotes(notes, roleTitle, client, apiKey)
-      : Promise.resolve({
-          currentBase: "", currentBonus: "", currentPension: "",
-          currentHealth: "", currentCar: "", currentLeave: "",
-          currentOther: "", targetSalary: "", targetNotes: "",
-          noticePeriod: "", interviewAvailability: "",
-          motivationForMove: "",
-          consultantNotes: [
-            { headline: "Candidate overview", detail: "No interview notes provided — please add notes and re-extract." },
-            { headline: "Current package", detail: "" },
-            { headline: "Notice period", detail: "" },
-            { headline: "Motivation", detail: "" },
-            { headline: "Consideration", detail: "" },
-          ],
-        }),
-    extractFromCV(cvText, roleTitle, client, apiKey),
-  ]);
-
-  // Merge: CV data provides profile fields; notes data provides compensation/interview fields
-  return {
-    // From CV
-    name:               cvData.name               || "",
-    headline:           cvData.headline           || "",
-    location:           cvData.location           || "",
-    euWorkRights:       cvData.euWorkRights        || "",
-    education:          cvData.education          || "",
-    professionalSummary: cvData.professionalSummary || "",
-    sectorExperience:   Array.isArray(cvData.sectorExperience) ? cvData.sectorExperience : [],
-    keyStrengths:       Array.isArray(cvData.keyStrengths) ? cvData.keyStrengths : [],
-
-    // From notes
-    currentBase:          notesData.currentBase          || "",
-    currentBonus:         notesData.currentBonus         || "",
-    currentPension:       notesData.currentPension       || "",
-    currentHealth:        notesData.currentHealth        || "",
-    currentCar:           notesData.currentCar           || "",
-    currentLeave:         notesData.currentLeave         || "",
-    currentOther:         notesData.currentOther         || "",
-    targetSalary:         notesData.targetSalary         || "",
-    targetNotes:          notesData.targetNotes          || "",
-    noticePeriod:         notesData.noticePeriod         || "",
-    interviewAvailability: notesData.interviewAvailability || "",
-    motivationForMove:    notesData.motivationForMove    || "",
-    consultantNotes:      Array.isArray(notesData.consultantNotes)
-                            ? notesData.consultantNotes
-                            : [],
-  };
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -280,15 +236,16 @@ export const handler = async (event) => {
       };
     }
 
+    // Netlify passes body as base64 when isBase64Encoded is true
     const bodyBuffer = event.isBase64Encoded
       ? Buffer.from(event.body, "base64")
       : Buffer.from(event.body || "", "utf8");
 
     const { fields, file } = parseMultipart(bodyBuffer, contentType);
 
-    const notes      = fields.notes      || "";
-    const roleTitle  = fields.roleTitle  || "";
-    const client     = fields.client     || "";
+    const notes = fields.notes || "";
+    const roleTitle = fields.roleTitle || "";
+    const client = fields.client || "";
     const consultant = fields.consultant || "";
 
     if (!file) {
@@ -319,7 +276,7 @@ export const handler = async (event) => {
       };
     }
 
-    // Extract CV text
+    // Extract text
     let cvText = "";
     try {
       if (file.mimetype === "application/pdf") {
@@ -345,18 +302,10 @@ export const handler = async (event) => {
       };
     }
 
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      return {
-        statusCode: 500,
-        body: JSON.stringify({ error: "ANTHROPIC_API_KEY is not configured on the server." }),
-      };
-    }
-
-    // Two-pass extraction
+    // Extract with Claude
     let candidateData;
     try {
-      candidateData = await extractWithTwoPass(cvText, notes, roleTitle, client, apiKey);
+      candidateData = await extractWithLLM(cvText, notes, roleTitle, client);
     } catch (err) {
       return {
         statusCode: 500,
@@ -366,6 +315,7 @@ export const handler = async (event) => {
       };
     }
 
+    // Return CV as base64 for later PDF merge (avoids S3 dependency)
     const cvBase64 = file.buffer.toString("base64");
 
     return {
@@ -374,7 +324,7 @@ export const handler = async (event) => {
       body: JSON.stringify({
         candidateData,
         cvBase64,
-        cvMimeType:     file.mimetype,
+        cvMimeType: file.mimetype,
         cvOriginalName: file.originalname,
       }),
     };
