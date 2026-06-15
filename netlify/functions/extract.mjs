@@ -151,13 +151,21 @@ Extract the following fields from the notes above. Return empty string "" for an
   "interviewAvailability": "when candidate is available for interview",
   "motivationForMove": "why the candidate wants to move, referencing ${client || "the client"} and the ${roleTitle || "role"} where relevant",
   "consultantNotes": [
-    {"headline": "Strongest selling point", "detail": "one sentence from the recruiter's perspective based on the notes"},
-    {"headline": "Current salary and package", "detail": "summarise the full package from the notes"},
-    {"headline": "Notice period and availability", "detail": "from the notes"},
-    {"headline": "Motivation for move", "detail": "from the notes"},
-    {"headline": "Practical consideration", "detail": "one useful observation for the hiring manager based on the notes"}
+    "highlight 1",
+    "highlight 2",
+    "highlight 3",
+    "highlight 4",
+    "highlight 5"
   ]
 }
+
+Rules for consultantNotes:
+- Write 5-6 short punchy lines (1 sentence each) capturing the most valuable insights from the interview.
+- These are qualitative highlights a hiring manager would want to know: personality, cultural fit, specific comments made, standout moments, or areas needing follow-up.
+- DO NOT repeat structured data already captured in other fields: do not mention salary figures, notice period, or motivation for move as separate highlights.
+- Write from the recruiter's perspective in third person (e.g. "Candidate demonstrated...", "Interviewer noted...").
+- If the notes are thin, extract what you can and flag where more detail is needed.
+- Return as a flat JSON array of plain strings, NOT objects with headline/detail keys.
 
 Return ONLY the JSON object above, populated from the notes. No other text.`;
 
