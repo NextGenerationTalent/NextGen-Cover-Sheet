@@ -185,7 +185,13 @@ async function buildCoverPage(pdfDoc, data, roleTitle, client, consultant, date)
     const cx = M + i * colW + 12;
     if (i > 0) page.drawRectangle({ x: M + i * colW, y: y - INFO_H, width: 0.75, height: INFO_H, color: NG_RULE });
     sd(page, col.label, { x: cx, y: y - 14, size: 6.5, font: fBold, color: NG_MGREY });
-    sd(page, stripMd(col.value), { x: cx, y: y - 32, size: 10, font: fBold, color: NG_BLACK });
+    // Wrap value to fit within column width
+    const valLines = wrap(stripMd(col.value), fBold, 10, colW - 24);
+    let vy = y - 30;
+    for (const vl of valLines.slice(0, 2)) {
+      sd(page, vl, { x: cx, y: vy, size: 10, font: fBold, color: NG_BLACK });
+      vy -= 13;
+    }
   });
   y -= INFO_H + 18;
 
