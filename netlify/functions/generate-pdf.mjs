@@ -1,32 +1,31 @@
-// Netlify Function: /api/generate-pdf
+// generate-pdf.mjs
 // Accepts JSON: { candidateData, cvBase64, cvMimeType, roleTitle, client, consultant, date }
 // Returns: { pdfBase64, filename }
 //
-// LAYOUT (single-column, top to bottom):
-//   1.  Header band (NG branding + date)
-//   2.  Candidate name · headline · meta row (location · EU rights · education)
-//   3.  Submission info box (Role | Client | Consultant)
-//   4.  Sector Experience chips
-//   5.  Key Strengths (full-width)
-//   6.  Current Package strip — 6 cells always rendered (Base · Bonus · Pension · Health · Car · Leave)
-//   7.  Expected Package strip — 1 cell (Target Base)
-//   8.  Info cluster — 3 equal boxes (Availability | Motivation for Move | Expected Salary note)
-//   9.  Consultant Interview Highlights (5-6 free-form punchy lines, no categories)
-//   10. Footer band
+// LAYOUT — premium single-column, A4:
+//   1.  Header band (black) — "NEXT GENERATION" left, "CANDIDATE COVER SHEET" + date right
+//   2.  Candidate name · headline (italic gold) · meta row (location · EU rights · education)
+//   3.  Submission info box (light grey, Role | Client | Consultant, with dividers)
+//   4.  Sector Experience chips (cream bg, tan border — outlined style)
+//   5.  Key Strengths (full-width, ">" bullets)
+//   6.  Current Package strip — 6 cells (BLACK bg, gold labels, white values)
+//   7.  Expected Package label + bottom band (BLACK bg, 3 cells: Availability | Motivation | Expected Salary)
+//   8.  Consultant Interview Highlights (5-6 punchy lines)
+//   9.  Footer band (black)
 
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { Buffer } from "buffer";
 
-// ─── Brand colours ────────────────────────────────────────────────────────────
-const BLACK     = rgb(0.08, 0.08, 0.10);
-const GOLD      = rgb(0.78, 0.62, 0.25);
-const GOLD_DARK = rgb(0.55, 0.43, 0.12);
-const DARK_GREY = rgb(0.22, 0.22, 0.25);
-const MID_GREY  = rgb(0.50, 0.50, 0.54);
-const LIGHT_BG  = rgb(0.97, 0.97, 0.97);
-const CHIP_BG   = rgb(0.95, 0.90, 0.78);
-const WHITE     = rgb(1, 1, 1);
-const RULE      = rgb(0.87, 0.87, 0.87);
+// ─── Brand colours ─────────────────────────────────────────────────────────────
+const NG_BLACK  = rgb(0, 0, 0);
+const NG_WHITE  = rgb(1, 1, 1);
+const NG_YELLOW = rgb(0.9725, 0.9176, 0.2039); // #f8ea34 exact brand yellow
+const NG_LGREY  = rgb(0.929, 0.898, 0.898);    // #ece5e5
+const NG_CREAM  = rgb(0.97, 0.95, 0.90);        // chip fill
+const NG_CBORD  = rgb(0.75, 0.70, 0.55);        // chip border
+const NG_MGREY  = rgb(0.50, 0.50, 0.50);
+const NG_RULE   = rgb(0.82, 0.82, 0.82);
+const NG_GOLD   = rgb(0.45, 0.38, 0.05);        // section labels / headline
 
 // ─── Strip markdown ───────────────────────────────────────────────────────────
 function stripMd(text) {
@@ -57,400 +56,295 @@ function wrap(text, font, size, maxW) {
   return lines.length ? lines : [""];
 }
 
-// ─── Safe draw ────────────────────────────────────────────────────────────────
+// ─── Safe draw — strips control chars, handles euro symbol ───────────────────
 function sd(page, text, opts) {
   if (!text || !String(text).trim()) return;
-  const clean = String(text).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, " ");
+  // Standard PDF fonts don't support the euro glyph — replace with "EUR "
+  const clean = String(text)
+    .replace(/\u20ac/g, "EUR ")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, " ");
   try { page.drawText(clean, opts); } catch {}
 }
 
 // ─── Section label ────────────────────────────────────────────────────────────
-function sectionLabel(page, label, x, y, fontBold) {
-  sd(page, label, { x, y, size: 6.5, font: fontBold, color: GOLD_DARK });
-  return y - 10;
+function sectionLabel(page, label, x, y, fBold) {
+  sd(page, label.toUpperCase(), { x, y, size: 7, font: fBold, color: NG_GOLD });
+  return y - 12;
 }
 
-// ─── Horizontal rule ─────────────────────────────────────────────────────────
+// ─── Hairline rule ────────────────────────────────────────────────────────────
 function rule(page, x, y, w) {
-  page.drawRectangle({ x, y, width: w, height: 0.6, color: RULE });
+  page.drawRectangle({ x, y, width: w, height: 0.5, color: NG_RULE });
 }
 
-// ─── 6-cell Current Package strip (always all 6 cells) ───────────────────────
-// Each cell shows label + value (or em-dash placeholder if empty)
-function drawPackageStrip(page, cells, y, fontBold, fontReg, W, M) {
-  const STRIP_H = 42;
-  const SW      = W - M * 2;
-  const cellW   = SW / cells.length;
-  const stripY  = y - STRIP_H;
+// ─── Current Package strip — 6 cells, BLACK background ───────────────────────
+function drawPackageStrip(page, cells, y, fBold, fReg, W, M) {
+  const STRIP_H = 44;
+  const SW = W - M * 2;
+  const cellW = SW / cells.length;
+  const sy = y - STRIP_H;
 
-  // Background
-  page.drawRectangle({ x: M, y: stripY, width: SW, height: STRIP_H, color: CHIP_BG });
-  // Border
-  page.drawRectangle({ x: M, y: stripY, width: SW, height: STRIP_H, color: rgb(0,0,0,0), borderColor: GOLD, borderWidth: 0.6 });
+  page.drawRectangle({ x: M, y: sy, width: SW, height: STRIP_H, color: NG_BLACK });
+  // Top yellow accent line
+  page.drawRectangle({ x: M, y: sy + STRIP_H - 1.5, width: SW, height: 1.5, color: NG_YELLOW });
 
   cells.forEach((cell, i) => {
-    // Vertical divider
-    if (i > 0) {
-      page.drawRectangle({ x: M + i * cellW, y: stripY, width: 0.5, height: STRIP_H, color: GOLD });
-    }
-    const cx = M + i * cellW + 9;
-    const val = cell.value && cell.value.trim() ? stripMd(cell.value) : "—";
-    const valColor = val === "—" ? MID_GREY : BLACK;
-
-    sd(page, cell.label.toUpperCase(), {
-      x: cx, y: stripY + STRIP_H - 12,
-      size: 5.5, font: fontBold, color: MID_GREY,
-    });
-
-    // Value — truncate to cell width
-    const maxW = cellW - 18;
-    const vLines = wrap(val, fontBold, 8.5, maxW);
-    sd(page, vLines[0], {
-      x: cx, y: stripY + 12,
-      size: 8.5, font: fontBold, color: valColor,
-    });
+    if (i > 0) page.drawRectangle({ x: M + i * cellW, y: sy, width: 0.75, height: STRIP_H, color: NG_YELLOW });
+    const cx = M + i * cellW + 10;
+    const val = cell.value && String(cell.value).trim() ? stripMd(cell.value) : "\u2014";
+    const valColor = val === "\u2014" ? NG_MGREY : NG_WHITE;
+    sd(page, cell.label.toUpperCase(), { x: cx, y: sy + STRIP_H - 15, size: 6, font: fBold, color: NG_YELLOW });
+    // Wrap value to fit cell width
+    const vLines = wrap(val, fBold, 9.5, cellW - 20);
+    sd(page, vLines[0], { x: cx, y: sy + 11, size: 9.5, font: fBold, color: valColor });
   });
 
-  return stripY - 8;
+  return sy - 8;
 }
 
-// ─── 3-box info cluster ───────────────────────────────────────────────────────
-// Three equal boxes side by side: Availability | Motivation for Move | Expected Salary
-function drawInfoCluster(page, boxes, y, fontBold, fontReg, W, M) {
-  const BOX_H = 52;
-  const SW    = W - M * 2;
-  const boxW  = SW / boxes.length;
-  const boxY  = y - BOX_H;
+// ─── Bottom band — BLACK, 3 equal cells ──────────────────────────────────────
+// Availability | Motivation for Move | Expected Salary
+function drawBottomBand(page, avail, motivation, expectedSalary, y, fBold, fReg, W, M) {
+  const BAND_H = 62;
+  const SW = W - M * 2;
+  const cellW = SW / 3;
+  const by = y - BAND_H;
 
-  boxes.forEach((box, i) => {
-    const bx = M + i * boxW;
-    // Gold/cream background matching package strips
-    page.drawRectangle({ x: bx, y: boxY, width: boxW, height: BOX_H, color: CHIP_BG });
-    // Vertical divider in gold
-    if (i > 0) {
-      page.drawRectangle({ x: bx, y: boxY, width: 0.5, height: BOX_H, color: GOLD });
-    }
-    page.drawRectangle({ x: bx, y: boxY, width: boxW, height: BOX_H, color: rgb(0,0,0,0), borderColor: GOLD, borderWidth: 0.6 });
+  page.drawRectangle({ x: M, y: by, width: SW, height: BAND_H, color: NG_BLACK });
+  page.drawRectangle({ x: M, y: by + BAND_H - 1.5, width: SW, height: 1.5, color: NG_YELLOW });
 
+  const cells = [
+    { label: "Availability",        value: avail },
+    { label: "Motivation for Move", value: motivation },
+    { label: "Expected Salary",     value: expectedSalary },
+  ];
+
+  cells.forEach((cell, i) => {
+    const bx = M + i * cellW;
+    if (i > 0) page.drawRectangle({ x: bx, y: by, width: 0.75, height: BAND_H, color: NG_YELLOW });
     const cx = bx + 10;
-    sd(page, box.label.toUpperCase(), {
-      x: cx, y: boxY + BOX_H - 13,
-      size: 5.5, font: fontBold, color: GOLD_DARK,
-    });
-
-    const val = box.value && box.value.trim() ? stripMd(box.value) : "—";
-    const valColor = val === "—" ? MID_GREY : BLACK;
-    const maxW = boxW - 20;
-    const vLines = wrap(val, fontReg, 8, maxW);
-    let ty = boxY + BOX_H - 26;
+    sd(page, cell.label.toUpperCase(), { x: cx, y: by + BAND_H - 15, size: 6, font: fBold, color: NG_YELLOW });
+    const val = cell.value && String(cell.value).trim() ? stripMd(cell.value) : "\u2014";
+    const valColor = val === "\u2014" ? NG_MGREY : NG_WHITE;
+    const vLines = wrap(val, fReg, 8, cellW - 20);
+    let ty = by + BAND_H - 28;
     for (const l of vLines.slice(0, 3)) {
-      sd(page, l, { x: cx, y: ty, size: 8, font: fontReg, color: valColor });
-      ty -= 11;
+      sd(page, l, { x: cx, y: ty, size: 8, font: fReg, color: valColor });
+      ty -= 12;
     }
   });
 
-  return boxY - 10;
+  return by - 14;
 }
 
 // ─── Cover sheet page builder ─────────────────────────────────────────────────
 async function buildCoverPage(pdfDoc, data, roleTitle, client, consultant, date) {
   const page = pdfDoc.addPage([595, 842]); // A4
-  const W = 595;
-  const M = 36;   // margin
-  const TW = W - M * 2; // usable text width
+  const W  = 595;
+  const M  = 40;
+  const TW = W - M * 2;
 
   const fBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
   const fReg  = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const fObl  = await pdfDoc.embedFont(StandardFonts.HelveticaOblique);
 
-  // ── 1. Header band ────────────────────────────────────────────────────────
-  page.drawRectangle({ x: 0, y: 792, width: W, height: 50, color: BLACK });
-  sd(page, "NEXT GENERATION", { x: M, y: 821, size: 13, font: fBold, color: WHITE });
-  sd(page, "RECRUITMENT",     { x: M, y: 806, size: 7.5, font: fReg, color: GOLD });
-  sd(page, "CANDIDATE COVER SHEET", { x: 370, y: 821, size: 7.5, font: fReg, color: rgb(0.65, 0.65, 0.65) });
-  sd(page, date,                    { x: 370, y: 808, size: 7.5, font: fReg, color: rgb(0.65, 0.65, 0.65) });
-  // Gold accent line
-  page.drawRectangle({ x: 0, y: 790, width: W, height: 2.5, color: GOLD });
+  let y = 842;
 
-  // ── 2. Candidate name + headline + meta ───────────────────────────────────
-  sd(page, stripMd(data.name) || "Candidate Name", {
-    x: M, y: 760, size: 24, font: fBold, color: BLACK,
-  });
-  if (data.headline) {
-    sd(page, stripMd(data.headline), {
-      x: M, y: 740, size: 10, font: fObl, color: GOLD,
-    });
+  // ── 1. Header ──────────────────────────────────────────────────────────────
+  page.drawRectangle({ x: 0, y: 796, width: W, height: 46, color: NG_BLACK });
+  page.drawRectangle({ x: 0, y: 794, width: W, height: 2, color: NG_YELLOW });
+  sd(page, "NEXT GENERATION", { x: M, y: 822, size: 12, font: fBold, color: NG_YELLOW });
+  sd(page, "RECRUITMENT",     { x: M, y: 808, size: 7.5, font: fReg, color: NG_LGREY });
+  sd(page, "CANDIDATE COVER SHEET", { x: W - M - 130, y: 824, size: 8, font: fBold, color: NG_LGREY });
+  sd(page, date || "",              { x: W - M - 130, y: 811, size: 8, font: fReg, color: NG_LGREY });
+  y = 786;
+
+  // ── 2. Name + headline + meta ──────────────────────────────────────────────
+  y -= 26;
+  sd(page, stripMd(data.name || ""), { x: M, y, size: 24, font: fBold, color: NG_BLACK });
+  y -= 20;
+  sd(page, stripMd(data.headline || ""), { x: M, y, size: 10.5, font: fObl, color: NG_GOLD });
+  y -= 14;
+  const metaParts = [data.location, data.euWorkRights, data.education].filter(Boolean).map(stripMd);
+  if (metaParts.length) {
+    sd(page, metaParts.join("   \u00b7   "), { x: M, y, size: 8, font: fReg, color: NG_MGREY });
+    y -= 14;
   }
+  rule(page, M, y, TW);
+  y -= 14;
 
-  // Meta row
-  let mx = M;
-  const meta = [data.location, data.euWorkRights, data.education].filter(Boolean);
-  for (let i = 0; i < meta.length; i++) {
-    if (i > 0) {
-      sd(page, "·", { x: mx, y: 724, size: 8, font: fReg, color: MID_GREY });
-      mx += 10;
-    }
-    const item = stripMd(meta[i]);
-    sd(page, item, { x: mx, y: 724, size: 8, font: fReg, color: DARK_GREY });
-    try { mx += fReg.widthOfTextAtSize(item, 8) + 6; } catch { mx += 80; }
-  }
-
-  rule(page, M, 715, TW);
-
-  // ── 3. Submission info box ────────────────────────────────────────────────
-  page.drawRectangle({
-    x: M, y: 675, width: TW, height: 34,
-    color: LIGHT_BG, borderColor: RULE, borderWidth: 0.6,
-  });
+  // ── 3. Submission info box ─────────────────────────────────────────────────
+  const INFO_H = 44;
+  page.drawRectangle({ x: M, y: y - INFO_H, width: TW, height: INFO_H, color: NG_LGREY });
+  const colW = TW / 3;
   [
-    { label: "ROLE",       value: roleTitle },
-    { label: "CLIENT",     value: client },
-    { label: "CONSULTANT", value: consultant },
-  ].forEach(({ label, value }, i) => {
-    const cx = M + i * (TW / 3) + 10;
-    sd(page, label,                     { x: cx, y: 698, size: 6,   font: fBold, color: MID_GREY });
-    sd(page, stripMd(value) || "—",     { x: cx, y: 685, size: 8.5, font: fBold, color: BLACK });
+    { label: "ROLE",       value: roleTitle  || "" },
+    { label: "CLIENT",     value: client     || "" },
+    { label: "CONSULTANT", value: consultant || "" },
+  ].forEach((col, i) => {
+    const cx = M + i * colW + 12;
+    if (i > 0) page.drawRectangle({ x: M + i * colW, y: y - INFO_H, width: 0.75, height: INFO_H, color: NG_RULE });
+    sd(page, col.label, { x: cx, y: y - 14, size: 6.5, font: fBold, color: NG_MGREY });
+    sd(page, stripMd(col.value), { x: cx, y: y - 32, size: 10, font: fBold, color: NG_BLACK });
   });
+  y -= INFO_H + 18;
 
-  let y = 660;
-
-  // ── 4. Sector Experience chips ────────────────────────────────────────────
-  y = sectionLabel(page, "SECTOR EXPERIENCE", M, y, fBold);
-  let chipX = M;
-  for (const chip of (data.sectorExperience || []).slice(0, 8)) {
-    const t = stripMd(chip);
-    let cw = 60;
-    try { cw = fReg.widthOfTextAtSize(t, 7.5) + 14; } catch {}
-    if (chipX + cw > W - M) { chipX = M; y -= 17; }
-    page.drawRectangle({ x: chipX, y: y - 4, width: cw, height: 13, color: CHIP_BG, borderColor: GOLD, borderWidth: 0.5 });
-    sd(page, t, { x: chipX + 7, y: y + 1, size: 7.5, font: fReg, color: DARK_GREY });
-    chipX += cw + 5;
-  }
-  y -= 22;
-
-  // ── 5. Key Strengths ──────────────────────────────────────────────────────
-  y = sectionLabel(page, "KEY STRENGTHS", M, y, fBold);
-  for (const s of (Array.isArray(data.keyStrengths) ? data.keyStrengths : []).slice(0, 5)) {
-    if (!s || !s.trim() || y < 120) continue;
-    for (const l of wrap(`> ${stripMd(s)}`, fReg, 8.5, TW)) {
-      if (y < 120) break;
-      sd(page, l, { x: M, y, size: 8.5, font: fReg, color: DARK_GREY });
-      y -= 12;
+  // ── 4. Sector chips — cream bg, tan border ─────────────────────────────────
+  if (data.sectorExperience && data.sectorExperience.length) {
+    y = sectionLabel(page, "Sector Experience", M, y, fBold);
+    y -= 4;
+    let cx = M, rowY = y;
+    for (const sector of data.sectorExperience) {
+      const txt = stripMd(sector);
+      let tw; try { tw = fReg.widthOfTextAtSize(txt, 8); } catch { tw = 80; }
+      const cw = tw + 20;
+      if (cx + cw > W - M) { cx = M; rowY -= 22; }
+      page.drawRectangle({ x: cx, y: rowY - 16, width: cw, height: 16, color: NG_CREAM });
+      page.drawRectangle({ x: cx, y: rowY - 16, width: cw, height: 0.75, color: NG_CBORD });
+      page.drawRectangle({ x: cx, y: rowY,       width: cw, height: 0.75, color: NG_CBORD });
+      page.drawRectangle({ x: cx, y: rowY - 16, width: 0.75, height: 16, color: NG_CBORD });
+      page.drawRectangle({ x: cx + cw - 0.75, y: rowY - 16, width: 0.75, height: 16, color: NG_CBORD });
+      sd(page, txt, { x: cx + 10, y: rowY - 11, size: 8, font: fReg, color: NG_BLACK });
+      cx += cw + 6;
     }
-    y -= 2;
-  }
-  y -= 6;
-
-  // ── 6. Current Package strip (always 6 cells) ─────────────────────────────
-  y = sectionLabel(page, "CURRENT PACKAGE", M, y, fBold);
-  y = drawPackageStrip(page, [
-    { label: "Base Salary",    value: data.currentBase    },
-    { label: "Bonus",          value: data.currentBonus   },
-    { label: "Pension",        value: data.currentPension },
-    { label: "Health",         value: data.currentHealth  },
-    { label: "Car / Allowance",value: data.currentCar     },
-    { label: "Annual Leave",   value: data.currentLeave   },
-  ], y, fBold, fReg, W, M);
-
-  // ── 7. Expected Package strip (1 cell — target base) ─────────────────────
-  if (data.targetSalary && data.targetSalary.trim()) {
-    y = sectionLabel(page, "EXPECTED PACKAGE", M, y, fBold);
-    y = drawPackageStrip(page, [
-      { label: "Target Base", value: data.targetSalary },
-    ], y, fBold, fReg, W, M);
+    y = rowY - 16 - 16;
   }
 
-  y -= 4;
-  rule(page, M, y, TW);
-  y -= 10;
-
-  // ── 8. Info cluster: Availability | Motivation for Move | Expected Salary ─
-  const availText = [
-    data.noticePeriod && data.noticePeriod.trim() ? `Notice: ${stripMd(data.noticePeriod)}` : null,
-    data.interviewAvailability && data.interviewAvailability.trim() &&
-      data.interviewAvailability.toLowerCase() !== "not specified in notes"
-      ? `Interview: ${stripMd(data.interviewAvailability)}`
-      : null,
-  ].filter(Boolean).join("  ·  ") || "—";
-
-  y = drawInfoCluster(page, [
-    { label: "Availability",       value: availText },
-    { label: "Motivation for Move",value: data.motivationForMove || "" },
-    { label: "Expected Salary",    value: data.targetSalary || "" },
-  ], y, fBold, fReg, W, M);
-
-  rule(page, M, y, TW);
-  y -= 12;
-
-  // ── 9. Consultant Interview Highlights ────────────────────────────────────
-  if (data.consultantNotes && data.consultantNotes.length > 0 && y > 80) {
-    y = sectionLabel(page, "CONSULTANT INTERVIEW HIGHLIGHTS", M, y, fBold);
-    // Render as free-form punchy lines — no bold headlines, just the insight
-    for (const note of data.consultantNotes.slice(0, 6)) {
-      if (y < 50) break;
-      // Support both string notes and {headline, detail} objects
-      let line = "";
-      if (typeof note === "string") {
-        line = stripMd(note);
-      } else {
-        // Prefer detail if it's substantive, otherwise fall back to headline
-        const detail   = stripMd(note.detail   || "");
-        const headline = stripMd(note.headline || "");
-        line = detail && detail.length > 10 ? detail : headline;
-      }
-      if (!line || !line.trim()) continue;
-      const lines = wrap(`· ${line}`, fReg, 8.5, TW);
+  // ── 5. Key Strengths — ">" bullets ────────────────────────────────────────
+  if (data.keyStrengths && data.keyStrengths.length) {
+    rule(page, M, y, TW);
+    y -= 14;
+    y = sectionLabel(page, "Key Strengths", M, y, fBold);
+    y -= 4;
+    for (const strength of data.keyStrengths) {
+      const txt = stripMd(strength);
+      if (!txt) continue;
+      const lines = wrap(txt, fReg, 9, TW - 16);
+      sd(page, ">", { x: M, y, size: 9, font: fBold, color: NG_BLACK });
       for (const l of lines) {
-        if (y < 50) break;
-        sd(page, l, { x: M, y, size: 8.5, font: fReg, color: DARK_GREY });
-        y -= 12;
+        sd(page, l, { x: M + 14, y, size: 9, font: fReg, color: NG_BLACK });
+        y -= 13;
       }
-      y -= 3;
+      y -= 2;
+    }
+    y -= 8;
+  }
+
+  // ── 6. Current Package strip — BLACK ──────────────────────────────────────
+  rule(page, M, y, TW);
+  y -= 14;
+  y = sectionLabel(page, "Current Package", M, y, fBold);
+  y -= 6;
+  y = drawPackageStrip(page, [
+    { label: "Base Salary",     value: data.currentBase    || "" },
+    { label: "Bonus",           value: data.currentBonus   || "" },
+    { label: "Pension",         value: data.currentPension || "" },
+    { label: "Health",          value: data.currentHealth  || "" },
+    { label: "Car / Allowance", value: data.currentCar     || "" },
+    { label: "Annual Leave",    value: data.currentLeave   || "" },
+  ], y, fBold, fReg, W, M);
+
+  // ── 7. Expected Package label + bottom band ────────────────────────────────
+  y -= 4;
+  y = sectionLabel(page, "Expected Package", M, y, fBold);
+  y -= 4;
+
+  const availParts = [];
+  if (data.noticePeriod)          availParts.push(`Notice: ${stripMd(data.noticePeriod)}`);
+  if (data.interviewAvailability) availParts.push(`Interview: ${stripMd(data.interviewAvailability)}`);
+  const availStr = availParts.join("  \u00b7  ") || "\u2014";
+
+  y = drawBottomBand(
+    page,
+    availStr,
+    data.motivationForMove || "",
+    data.targetSalary || "",
+    y, fBold, fReg, W, M
+  );
+
+  // ── 8. Consultant Interview Highlights ────────────────────────────────────
+  const notes = Array.isArray(data.consultantNotes) ? data.consultantNotes : [];
+  if (notes.length) {
+    rule(page, M, y, TW);
+    y -= 14;
+    y = sectionLabel(page, "Consultant Interview Highlights", M, y, fBold);
+    y -= 4;
+    for (const note of notes) {
+      const txt = stripMd(typeof note === "string" ? note : (note.detail || note.headline || ""));
+      if (!txt) continue;
+      const lines = wrap(txt, fReg, 8.5, TW - 14);
+      sd(page, "\u00b7", { x: M, y, size: 9, font: fBold, color: NG_BLACK });
+      for (const l of lines) {
+        sd(page, l, { x: M + 12, y, size: 8.5, font: fReg, color: NG_BLACK });
+        y -= 13;
+      }
+      y -= 4;
     }
   }
 
-  // ── 10. Footer ────────────────────────────────────────────────────────────
-  page.drawRectangle({ x: 0, y: 0, width: W, height: 30, color: BLACK });
-  sd(page, "NEXT GENERATION RECRUITMENT  ·  CONFIDENTIAL", {
-    x: M, y: 11, size: 6.5, font: fReg, color: rgb(0.50, 0.50, 0.50),
-  });
-  sd(page, "nextgenrecruitment.ie", {
-    x: W - 118, y: 11, size: 6.5, font: fReg, color: GOLD,
-  });
+  // ── 9. Footer ──────────────────────────────────────────────────────────────
+  page.drawRectangle({ x: 0, y: 0, width: W, height: 28, color: NG_BLACK });
+  page.drawRectangle({ x: 0, y: 28, width: W, height: 1.5, color: NG_YELLOW });
+  sd(page, "NEXT GENERATION RECRUITMENT  |  CONFIDENTIAL", { x: M, y: 10, size: 6.5, font: fReg, color: NG_LGREY });
+  sd(page, "nextgenerationgroup.ie", { x: W - M - 90, y: 10, size: 6.5, font: fReg, color: NG_LGREY });
 }
 
-// ─── Personal detail redaction ────────────────────────────────────────────────
-function isPersonalLine(line) {
-  const t = line.trim();
-  if (/(?:\+?\d[\s\-.]?){7,15}/.test(t) && /\d{4,}/.test(t)) return true;
-  if (/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/.test(t)) return true;
-  if (/linkedin\.com\/in\//i.test(t)) return true;
-  if (/^[\d\s\(\)\+\-\.]{7,20}$/.test(t)) return true;
-  return false;
-}
-
-// ─── CV text renderer (Word fallback) ────────────────────────────────────────
-async function appendCVTextPages(pdfDoc, cvText) {
-  const fReg  = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const fBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-
-  const lines = cvText.split("\n")
-    .filter((l) => l.trim() && !isPersonalLine(l))
-    .map((l) =>
-      l
-        .replace(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g, "[redacted]")
-        .replace(/(?:\+?\d[\s\-.]?){7,15}/g, (m) => (m.replace(/\D/g, "").length >= 7 ? "[redacted]" : m))
-        .replace(/linkedin\.com\/in\/[^\s]*/gi, "[redacted]")
-    );
-
-  const PAGE_TOP = 800, PAGE_BOTTOM = 50, LINE_H = 13, MAR = 36, TW = 523;
-  const allWrapped = [];
-  for (const line of lines) {
-    allWrapped.push(...wrap(line, fReg, 9, TW));
-    allWrapped.push("");
-  }
-
-  let page = pdfDoc.addPage([595, 842]);
-  let ty = PAGE_TOP;
-  let headerDrawn = false;
-
-  for (const wl of allWrapped) {
-    if (ty < PAGE_BOTTOM) {
-      page = pdfDoc.addPage([595, 842]);
-      ty = PAGE_TOP;
-      headerDrawn = false;
+// ─── CV page builder ──────────────────────────────────────────────────────────
+async function buildCVPages(pdfDoc, cvBase64, cvMimeType) {
+  if (!cvBase64) return;
+  try {
+    const cvBytes = Buffer.from(cvBase64, "base64");
+    if (cvMimeType === "application/pdf") {
+      const cvDoc = await PDFDocument.load(cvBytes, { ignoreEncryption: true });
+      const pages = await pdfDoc.copyPages(cvDoc, cvDoc.getPageIndices());
+      for (const p of pages) pdfDoc.addPage(p);
+    } else {
+      const page = pdfDoc.addPage([595, 842]);
+      let img;
+      try {
+        img = cvMimeType === "image/png"
+          ? await pdfDoc.embedPng(cvBytes)
+          : await pdfDoc.embedJpg(cvBytes);
+      } catch { return; }
+      const { width: iw, height: ih } = img.scale(1);
+      const scale = Math.min(515 / iw, 762 / ih, 1);
+      page.drawImage(img, { x: 40, y: 40, width: iw * scale, height: ih * scale });
     }
-    if (!headerDrawn) {
-      sd(page, "CURRICULUM VITAE", { x: MAR, y: ty, size: 13, font: fBold, color: BLACK });
-      page.drawRectangle({ x: MAR, y: ty - 5, width: TW, height: 1.5, color: GOLD });
-      ty -= 28;
-      headerDrawn = true;
-    }
-    if (wl) sd(page, wl, { x: MAR, y: ty, size: 9, font: fReg, color: DARK_GREY });
-    ty -= LINE_H;
-  }
+  } catch {}
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 export const handler = async (event) => {
   if (event.httpMethod !== "POST") {
-    return { statusCode: 405, body: JSON.stringify({ error: "Method not allowed" }) };
+    return { statusCode: 405, body: "Method Not Allowed" };
   }
 
+  let body;
   try {
-    const body = JSON.parse(event.body || "{}");
-    const { candidateData, cvBase64, cvMimeType, roleTitle, client, consultant, date } = body;
+    body = JSON.parse(event.body || "{}");
+  } catch {
+    return { statusCode: 400, body: "Invalid JSON" };
+  }
 
-    if (!candidateData?.name?.trim()) {
-      return {
-        statusCode: 400,
-        body: JSON.stringify({ error: "Candidate name is required. Please fill in the Name field before downloading." }),
-      };
-    }
+  const { candidateData = {}, cvBase64, cvMimeType, roleTitle, client, consultant, date } = body;
 
+  try {
     const pdfDoc = await PDFDocument.create();
     await buildCoverPage(pdfDoc, candidateData, roleTitle, client, consultant, date);
-
-    if (cvBase64 && cvMimeType) {
-      const cvBuffer = Buffer.from(cvBase64, "base64");
-      try {
-        if (cvMimeType === "application/pdf") {
-          const cvPdf = await PDFDocument.load(cvBuffer, { ignoreEncryption: true });
-          const copied = await pdfDoc.copyPages(cvPdf, [...Array(cvPdf.getPageCount()).keys()]);
-          copied.forEach((p) => pdfDoc.addPage(p));
-
-          // Redact personal details on first CV page
-          const first = copied[0];
-          const { height: pH, width: pW } = first.getSize();
-          let blockH = 80;
-          try {
-            const { default: pdfParse } = await import("pdf-parse/lib/pdf-parse.js");
-            const parsed = await pdfParse(cvBuffer);
-            const firstLines = (parsed.text || "").split("\n").slice(0, 20);
-            let last = 0;
-            firstLines.forEach((l, idx) => {
-              if (
-                /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/.test(l) ||
-                /(?:\+?\d[\s\-.]?){7,15}/.test(l) ||
-                /linkedin\.com\/in\//i.test(l) ||
-                /^[\d\s\(\)\+\-\.]{7,20}$/.test(l.trim())
-              ) last = idx;
-            });
-            blockH = Math.max(60, (last + 2) * 14);
-          } catch {}
-
-          first.drawRectangle({ x: 0, y: pH - blockH, width: pW, height: blockH, color: WHITE });
-          first.drawRectangle({ x: 0, y: pH - blockH, width: pW, height: 1, color: GOLD });
-        } else {
-          const mammoth = await import("mammoth");
-          const { value: cvText } = await mammoth.extractRawText({ buffer: cvBuffer });
-          if (cvText?.trim()) await appendCVTextPages(pdfDoc, cvText);
-        }
-      } catch (err) {
-        console.error("[PDF] CV processing failed:", err);
-        const fb = await pdfDoc.embedFont(StandardFonts.Helvetica);
-        const fp = pdfDoc.addPage([595, 842]);
-        fp.drawText("CV could not be embedded. Please attach separately.", {
-          x: 36, y: 400, size: 10, font: fb, color: DARK_GREY,
-        });
-      }
-    }
+    await buildCVPages(pdfDoc, cvBase64, cvMimeType);
 
     const pdfBytes  = await pdfDoc.save();
     const pdfBase64 = Buffer.from(pdfBytes).toString("base64");
-    const safeName   = (candidateData.name || "Candidate").replace(/[^a-zA-Z0-9\s]/g, "").replace(/\s+/g, "_");
-    const safeClient = (client || "Client").replace(/[^a-zA-Z0-9\s]/g, "").replace(/\s+/g, "_");
+    const safeName  = (candidateData.name || "candidate").replace(/[^a-zA-Z0-9 ]/g, "").replace(/\s+/g, "_");
+    const filename  = `${safeName}_CoverSheet.pdf`;
 
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pdfBase64, filename: `CoverSheet_${safeName}_${safeClient}.pdf` }),
+      body: JSON.stringify({ pdfBase64, filename }),
     };
   } catch (err) {
-    console.error("[generate-pdf]", err);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: `PDF generation failed: ${err.message}` }),
-    };
+    console.error("generate-pdf error:", err);
+    return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
   }
 };
