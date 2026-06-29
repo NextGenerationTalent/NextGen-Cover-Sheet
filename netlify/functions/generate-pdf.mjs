@@ -59,11 +59,18 @@ function wrap(text, font, size, maxW) {
 // ─── Safe draw — strips control chars, handles euro symbol ───────────────────
 function sd(page, text, opts) {
   if (!text || !String(text).trim()) return;
-  // Standard PDF fonts don't support the euro glyph — replace with "EUR "
+  // Standard PDF fonts don't support the euro glyph — replace with the euro sign
+  // using the Latin-1 compatible representation
   const clean = String(text)
-    .replace(/\u20ac/g, "EUR ")
+    .replace(/\u20ac/g, "\u20ac") // euro sign — pdf-lib encodes Helvetica as WinAnsi which includes euro at 0x80
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, " ");
-  try { page.drawText(clean, opts); } catch {}
+  try { page.drawText(clean, opts); } catch (e) {
+    // Fallback: if euro still fails, replace with EUR prefix
+    try {
+      const fallback = clean.replace(/\u20ac/g, "EUR ");
+      page.drawText(fallback, opts);
+    } catch {}
+  }
 }
 
 // ─── Section label ────────────────────────────────────────────────────────────

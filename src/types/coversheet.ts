@@ -19,7 +19,7 @@ export interface CandidateData {
   noticePeriod: string;
   interviewAvailability: string;
   motivationForMove: string;
-  consultantNotes: { headline: string; detail: string }[];
+  consultantNotes: string[];
 }
 
 export const EMPTY_CANDIDATE: CandidateData = {
@@ -43,11 +43,5 @@ export const EMPTY_CANDIDATE: CandidateData = {
   noticePeriod: "",
   interviewAvailability: "",
   motivationForMove: "",
-  consultantNotes: [
-    { headline: "", detail: "" },
-    { headline: "", detail: "" },
-    { headline: "", detail: "" },
-    { headline: "", detail: "" },
-    { headline: "", detail: "" },
-  ],
+  consultantNotes: ["", "", "", "", ""],
 };
