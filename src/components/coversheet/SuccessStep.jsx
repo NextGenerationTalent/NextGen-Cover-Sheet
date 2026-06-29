@@ -41,7 +41,7 @@ function buildTrackerNotes(data, roleTitle, client, date) {
     data.motivationForMove,
     "",
     "CONSULTANT INTERVIEW NOTES:",
-    ...data.consultantNotes.map((n, i) => `${i + 1}. ${typeof n === "string" ? n : (n.detail || n.headline || "")}`).filter(Boolean),
+    ...data.consultantNotes.map((n, i) => `${i + 1}. ${n.headline}: ${n.detail}`),
   ];
   return lines.filter(Boolean).join("\n").replace(/\n{3,}/g, "\n\n");
 }
