@@ -118,6 +118,117 @@ function redactPersonalDetails(text) {
     .replace(LINKEDIN_RE, "[redacted]");
 }
 
+// ─── Adaptive PDF contact-detail redaction ────────────────────────────────────
+// Works across arbitrary CV layouts (single-column headers, two-column
+// sidebars, contact info repeated in a footer, etc.) instead of assuming
+// one fixed box size. For each page:
+//   1. Group text items into lines (by shared baseline).
+//   2. Walk down from the top of page 1 collecting a "header cluster" until
+//      a recognizable section heading (Summary/Experience/Education/...) or
+//      a paragraph-length line is hit — i.e. the box is bounded by the CV's
+//      OWN real content, not a guessed pixel height.
+//   3. If that cluster contains an email/phone/LinkedIn line, redact the
+//      whole cluster (covers the name row + address + phone + email
+//      together, however tall that happens to be on this specific CV).
+//   4. Independently, scan every page for any standalone email/phone/
+//      LinkedIn line anywhere else (sidebar, footer, repeated header) and
+//      redact just that line's own bounding box.
+// If the PDF can't be parsed at all (rare — encrypted/corrupt), fall back to
+// a generous fixed band on page 1 so redaction still happens rather than
+// silently doing nothing.
+const SECTION_HEADING_RE = /^(professional\s+summary|summary|profile|about(\s+me)?|objective|career\s+objective|work\s+experience|experience|employment(\s+history)?|education|qualifications?|certifications?|key\s+skills|skills|competenc(?:y|ies)|core\s+competenc(?:y|ies)|achievements?|references?|interests?|hobbies|projects?|publications?|languages?|training)\s*:?$/i;
+
+async function redactPersonalDetailsInPdf(pages, cvBytes) {
+  const SAFE_FLOOR = 150; // fallback band height on page 1 if detection fails entirely
+  let detectionSucceeded = false;
+
+  try {
+    const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const doc = await pdfjsLib.getDocument({
+      data: new Uint8Array(cvBytes),
+      useWorkerFetch: false,
+      isEvalSupported: false,
+      disableFontFace: true,
+    }).promise;
+
+    for (let i = 0; i < pages.length && i < doc.numPages; i++) {
+      const pdfjsPage = await doc.getPage(i + 1);
+      const textContent = await pdfjsPage.getTextContent();
+      const page = pages[i];
+      const { width: pW, height: pH } = page.getSize();
+
+      // Group items sharing a baseline (within 2pt) into lines.
+      const buckets = new Map();
+      for (const item of textContent.items) {
+        if (!item.str || !item.str.trim()) continue;
+        const key = Math.round(item.transform[5] / 2) * 2;
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key).push(item);
+      }
+      const lines = [...buckets.values()]
+        .map((items) => ({
+          y: items[0].transform[5],
+          text: items.map((it) => it.str).join(" ").replace(/\s+/g, " ").trim(),
+          minX: Math.min(...items.map((it) => it.transform[4])),
+          maxX: Math.max(...items.map((it) => it.transform[4] + (it.width || 0))),
+          maxH: Math.max(...items.map((it) => it.height || Math.abs(it.transform[3]) || 10)),
+          items,
+        }))
+        .sort((a, b) => b.y - a.y); // top of page first
+
+      let headerBandBottomY = null;
+
+      if (i === 0) {
+        const headerLines = [];
+        for (const line of lines) {
+          if (headerLines.length >= 10) break;
+          if (SECTION_HEADING_RE.test(line.text)) break;
+          if (line.text.length > 100) break; // paragraph text, not a header line
+          headerLines.push(line);
+        }
+        const headerHasPersonal = headerLines.some(
+          (l) => isPersonalLine(l.text) || l.items.some((it) => isPersonalLine(it.str))
+        );
+        if (headerHasPersonal && headerLines.length) {
+          const lastLine = headerLines[headerLines.length - 1];
+          const bottomY = lastLine.y - lastLine.maxH * 0.35 - 10;
+          const blockH = Math.max(SAFE_FLOOR, pH - bottomY);
+          headerBandBottomY = pH - blockH;
+          page.drawRectangle({ x: 0, y: headerBandBottomY, width: pW, height: blockH, color: NG_WHITE });
+          page.drawRectangle({ x: 0, y: headerBandBottomY, width: pW, height: 1.5, color: NG_YELLOW });
+          detectionSucceeded = true;
+        }
+      }
+
+      // Independently cover any standalone contact line anywhere else on
+      // this page (sidebar, footer, repeated header on later pages, etc.)
+      // that isn't already inside the header band drawn above.
+      for (const line of lines) {
+        if (headerBandBottomY !== null && line.y >= headerBandBottomY) continue; // already covered
+        const matches = isPersonalLine(line.text) || line.items.some((it) => isPersonalLine(it.str));
+        if (!matches) continue;
+        const pad = 3;
+        const boxX = Math.max(0, line.minX - pad);
+        const boxW = Math.min(pW - boxX, line.maxX - line.minX + pad * 2);
+        const boxY = line.y - line.maxH * 0.3 - pad;
+        const boxH = line.maxH * 1.3 + pad * 2;
+        page.drawRectangle({ x: boxX, y: boxY, width: boxW, height: boxH, color: NG_WHITE });
+        detectionSucceeded = true;
+      }
+    }
+  } catch {
+    // Parsing failed entirely (encrypted/corrupt PDF etc.) — fall through
+    // to the safety-net band below.
+  }
+
+  if (!detectionSucceeded && pages.length) {
+    const first = pages[0];
+    const { width: pW, height: pH } = first.getSize();
+    first.drawRectangle({ x: 0, y: pH - SAFE_FLOOR, width: pW, height: SAFE_FLOOR, color: NG_WHITE });
+    first.drawRectangle({ x: 0, y: pH - SAFE_FLOOR, width: pW, height: 1.5, color: NG_YELLOW });
+  }
+}
+
 // ─── Current Package strip — 6 cells, BLACK background ───────────────────────
 function drawPackageStrip(page, cells, y, fBold, fReg, W, M) {
   const STRIP_H = 44;
@@ -401,23 +512,7 @@ async function buildCVPages(pdfDoc, cvBase64, cvMimeType, cvText, cvOriginalName
       for (const p of pages) pdfDoc.addPage(p);
 
       if (pages.length) {
-        // Redact contact details on the FIRST CV page by covering the top
-        // band with a white box. Estimate how deep the block runs by
-        // scanning the extracted text for email/phone/LinkedIn lines.
-        const first = pages[0];
-        const { width: pW, height: pH } = first.getSize();
-        let blockH = 80; // sensible default if text extraction fails
-        try {
-          const { default: pdfParse } = await import("pdf-parse/lib/pdf-parse.js");
-          const parsed = await pdfParse(cvBytes);
-          const firstLines = (parsed.text || "").split("\n").slice(0, 20);
-          let lastPersonalLine = -1;
-          firstLines.forEach((l, idx) => { if (isPersonalLine(l)) lastPersonalLine = idx; });
-          if (lastPersonalLine >= 0) blockH = Math.max(60, (lastPersonalLine + 2) * 14);
-        } catch { /* keep default blockH */ }
-
-        first.drawRectangle({ x: 0, y: pH - blockH, width: pW, height: blockH, color: NG_WHITE });
-        first.drawRectangle({ x: 0, y: pH - blockH, width: pW, height: 1.5, color: NG_YELLOW });
+        await redactPersonalDetailsInPdf(pages, cvBytes);
       }
 
       // Brand every CV page with the same footer as the cover sheet.
