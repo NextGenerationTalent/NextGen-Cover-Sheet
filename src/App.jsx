@@ -22,6 +22,7 @@ export default function App() {
   const [cvBase64, setCvBase64]           = useState("");
   const [cvMimeType, setCvMimeType]       = useState("");
   const [cvOriginalName, setCvOriginalName] = useState("");
+  const [cvText, setCvText]               = useState("");
 
   // Loading / error
   const [extracting, setExtracting]   = useState(false);
@@ -69,6 +70,7 @@ export default function App() {
       setCvBase64(json.cvBase64);
       setCvMimeType(json.cvMimeType);
       setCvOriginalName(json.cvOriginalName);
+      setCvText(json.cvText || "");
       setStep(2);
     } catch (err) {
       setExtractError(err.message || "Extraction failed. Please try again.");
@@ -95,6 +97,7 @@ export default function App() {
           candidateData: data,
           cvBase64,
           cvMimeType,
+          cvText,
           roleTitle,
           client,
           consultant,
@@ -125,7 +128,7 @@ export default function App() {
     } finally {
       setGenerating(false);
     }
-  }, [cvBase64, cvMimeType, roleTitle, client, consultant, date]);
+  }, [cvBase64, cvMimeType, cvText, roleTitle, client, consultant, date]);
 
   // ── Reset ────────────────────────────────────────────────────────────────
   const handleReset = useCallback(() => {
@@ -138,6 +141,7 @@ export default function App() {
     setCvBase64("");
     setCvMimeType("");
     setCvOriginalName("");
+    setCvText("");
     setExtractError("");
     setGenerateError("");
     setFilename("");
