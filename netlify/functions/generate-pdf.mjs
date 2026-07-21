@@ -442,45 +442,4 @@ async function buildCVPages(pdfDoc, cvBase64, cvMimeType, cvText, cvOriginalName
     } else {
       // Word docs (.doc / .docx) — render the extracted text as CV pages.
       // Redaction + footer branding are handled inside buildCVTextPages.
-      await buildCVTextPages(pdfDoc, cvText, cvOriginalName);
-    }
-  } catch (err) {
-    console.error("buildCVPages error:", err);
-  }
-}
-
-// ─── Handler ──────────────────────────────────────────────────────────────────
-export const handler = async (event) => {
-  if (event.httpMethod !== "POST") {
-    return { statusCode: 405, body: "Method Not Allowed" };
-  }
-
-  let body;
-  try {
-    body = JSON.parse(event.body || "{}");
-  } catch {
-    return { statusCode: 400, body: "Invalid JSON" };
-  }
-
-  const { candidateData = {}, cvBase64, cvMimeType, cvText, cvOriginalName, roleTitle, client, consultant, date } = body;
-
-  try {
-    const pdfDoc = await PDFDocument.create();
-    await buildCoverPage(pdfDoc, candidateData, roleTitle, client, consultant, date);
-    await buildCVPages(pdfDoc, cvBase64, cvMimeType, cvText, cvOriginalName);
-
-    const pdfBytes  = await pdfDoc.save();
-    const pdfBase64 = Buffer.from(pdfBytes).toString("base64");
-    const safeName  = (candidateData.name || "candidate").replace(/[^a-zA-Z0-9 ]/g, "").replace(/\s+/g, "_");
-    const filename  = `${safeName}_CoverSheet.pdf`;
-
-    return {
-      statusCode: 200,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pdfBase64, filename }),
-    };
-  } catch (err) {
-    console.error("generate-pdf error:", err);
-    return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
-  }
-};
+      await buildCVTextPages(pdfDoc, cvText,
