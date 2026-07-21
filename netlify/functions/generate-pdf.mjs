@@ -84,6 +84,40 @@ function rule(page, x, y, w) {
   page.drawRectangle({ x, y, width: w, height: 0.5, color: NG_RULE });
 }
 
+// ─── Footer band — drawn on every page (cover sheet AND every CV page) ───────
+function drawFooterBand(page, fReg, W, M) {
+  page.drawRectangle({ x: 0, y: 0, width: W, height: 28, color: NG_BLACK });
+  page.drawRectangle({ x: 0, y: 28, width: W, height: 1.5, color: NG_YELLOW });
+  sd(page, "NEXT GENERATION RECRUITMENT  |  CONFIDENTIAL", { x: M, y: 10, size: 6.5, font: fReg, color: NG_LGREY });
+  sd(page, "nextgenerationgroup.ie", { x: W - M - 90, y: 10, size: 6.5, font: fReg, color: NG_LGREY });
+}
+
+// ─── Personal detail redaction ─────────────────────────────────────────────────
+// Applied to the candidate's original CV pages so raw email/phone/LinkedIn
+// details aren't forwarded to clients on the CV itself (the cover sheet page
+// still shows location/EU rights/education, which is intentional).
+const EMAIL_RE    = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+const PHONE_RE    = /(?:\+?\d[\s\-.]?){7,15}/g;
+const LINKEDIN_RE = /linkedin\.com\/in\/[^\s]*/gi;
+
+function isPersonalLine(line) {
+  const t = (line || "").trim();
+  if (!t) return false;
+  if (/(?:\+?\d[\s\-.]?){7,15}/.test(t) && /\d{4,}/.test(t)) return true;
+  if (/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/.test(t)) return true;
+  if (/linkedin\.com\/in\//i.test(t)) return true;
+  if (/^[\d\s()+\-.]{7,20}$/.test(t)) return true;
+  return false;
+}
+
+function redactPersonalDetails(text) {
+  if (!text) return text;
+  return String(text)
+    .replace(EMAIL_RE, "[redacted]")
+    .replace(PHONE_RE, (m) => (m.replace(/\D/g, "").length >= 7 ? "[redacted]" : m))
+    .replace(LINKEDIN_RE, "[redacted]");
+}
+
 // ─── Current Package strip — 6 cells, BLACK background ───────────────────────
 function drawPackageStrip(page, cells, y, fBold, fReg, W, M) {
   const STRIP_H = 44;
@@ -296,22 +330,101 @@ async function buildCoverPage(pdfDoc, data, roleTitle, client, consultant, date)
   }
 
   // ── 9. Footer ──────────────────────────────────────────────────────────────
-  page.drawRectangle({ x: 0, y: 0, width: W, height: 28, color: NG_BLACK });
-  page.drawRectangle({ x: 0, y: 28, width: W, height: 1.5, color: NG_YELLOW });
-  sd(page, "NEXT GENERATION RECRUITMENT  |  CONFIDENTIAL", { x: M, y: 10, size: 6.5, font: fReg, color: NG_LGREY });
-  sd(page, "nextgenerationgroup.ie", { x: W - M - 90, y: 10, size: 6.5, font: fReg, color: NG_LGREY });
+  drawFooterBand(page, fReg, W, M);
+}
+
+// ─── CV text page builder — used for Word docs (.doc/.docx) ──────────────────
+// pdf-lib can't embed a Word file directly, so we paginate the plain text
+// extracted by mammoth (in extract.mjs) onto plain A4 pages instead.
+// Personal contact lines (email/phone/LinkedIn) are stripped, and every page
+// gets the same branded footer as the cover sheet.
+async function buildCVTextPages(pdfDoc, cvText, cvOriginalName) {
+  const raw = (cvText || "").replace(/\r\n/g, "\n").trim();
+  if (!raw) return;
+
+  const W = 595, H = 842, M = 50;
+  const fReg  = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const fBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const bodySize = 9.5;
+  const lineH = 13;
+  const maxW = W - M * 2;
+  const FOOTER_H = 30; // keep body text clear of the footer band
+
+  // Drop personal-detail lines entirely, redact any remaining inline matches,
+  // then wrap to page width. Blank raw lines are kept as paragraph breaks.
+  const rawLines = raw.split("\n");
+  const lines = [];
+  for (const rl of rawLines) {
+    if (!rl.trim()) { lines.push(""); continue; }
+    if (isPersonalLine(rl)) continue;
+    const clean = redactPersonalDetails(rl);
+    lines.push(...wrap(clean, fReg, bodySize, maxW));
+  }
+
+  let page = null;
+  let y = 0;
+
+  const newPage = (first) => {
+    page = pdfDoc.addPage([W, H]);
+    y = H - M;
+    if (first) {
+      sd(page, "ORIGINAL CV", { x: M, y, size: 9, font: fBold, color: NG_MGREY });
+      if (cvOriginalName) {
+        sd(page, cvOriginalName, { x: M, y: y - 12, size: 7.5, font: fReg, color: NG_MGREY });
+      }
+      rule(page, M, y - 18, maxW);
+      y -= 30;
+    }
+    drawFooterBand(page, fReg, W, M);
+    return page;
+  };
+
+  newPage(true);
+  for (const line of lines) {
+    if (y < FOOTER_H + lineH) newPage(false);
+    if (line) sd(page, line, { x: M, y, size: bodySize, font: fReg, color: NG_BLACK });
+    y -= lineH;
+  }
 }
 
 // ─── CV page builder ──────────────────────────────────────────────────────────
-async function buildCVPages(pdfDoc, cvBase64, cvMimeType) {
-  if (!cvBase64) return;
+async function buildCVPages(pdfDoc, cvBase64, cvMimeType, cvText, cvOriginalName) {
+  const W = 595, M = 40;
+  const fReg = await pdfDoc.embedFont(StandardFonts.Helvetica);
+
   try {
-    const cvBytes = Buffer.from(cvBase64, "base64");
     if (cvMimeType === "application/pdf") {
+      if (!cvBase64) return;
+      const cvBytes = Buffer.from(cvBase64, "base64");
       const cvDoc = await PDFDocument.load(cvBytes, { ignoreEncryption: true });
       const pages = await pdfDoc.copyPages(cvDoc, cvDoc.getPageIndices());
       for (const p of pages) pdfDoc.addPage(p);
-    } else {
+
+      if (pages.length) {
+        // Redact contact details on the FIRST CV page by covering the top
+        // band with a white box. Estimate how deep the block runs by
+        // scanning the extracted text for email/phone/LinkedIn lines.
+        const first = pages[0];
+        const { width: pW, height: pH } = first.getSize();
+        let blockH = 80; // sensible default if text extraction fails
+        try {
+          const { default: pdfParse } = await import("pdf-parse/lib/pdf-parse.js");
+          const parsed = await pdfParse(cvBytes);
+          const firstLines = (parsed.text || "").split("\n").slice(0, 20);
+          let lastPersonalLine = -1;
+          firstLines.forEach((l, idx) => { if (isPersonalLine(l)) lastPersonalLine = idx; });
+          if (lastPersonalLine >= 0) blockH = Math.max(60, (lastPersonalLine + 2) * 14);
+        } catch { /* keep default blockH */ }
+
+        first.drawRectangle({ x: 0, y: pH - blockH, width: pW, height: blockH, color: NG_WHITE });
+        first.drawRectangle({ x: 0, y: pH - blockH, width: pW, height: 1.5, color: NG_YELLOW });
+      }
+
+      // Brand every CV page with the same footer as the cover sheet.
+      for (const p of pages) drawFooterBand(p, fReg, W, M);
+    } else if (cvMimeType === "image/png" || cvMimeType === "image/jpeg" || cvMimeType === "image/jpg") {
+      if (!cvBase64) return;
+      const cvBytes = Buffer.from(cvBase64, "base64");
       const page = pdfDoc.addPage([595, 842]);
       let img;
       try {
@@ -321,9 +434,19 @@ async function buildCVPages(pdfDoc, cvBase64, cvMimeType) {
       } catch { return; }
       const { width: iw, height: ih } = img.scale(1);
       const scale = Math.min(515 / iw, 762 / ih, 1);
+      // Leave room at the bottom for the footer band; images can't be
+      // text-redacted automatically, so we don't attempt contact-detail
+      // redaction here (unlike the PDF/text paths above).
       page.drawImage(img, { x: 40, y: 40, width: iw * scale, height: ih * scale });
+      drawFooterBand(page, fReg, W, M);
+    } else {
+      // Word docs (.doc / .docx) — render the extracted text as CV pages.
+      // Redaction + footer branding are handled inside buildCVTextPages.
+      await buildCVTextPages(pdfDoc, cvText, cvOriginalName);
     }
-  } catch {}
+  } catch (err) {
+    console.error("buildCVPages error:", err);
+  }
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -339,12 +462,12 @@ export const handler = async (event) => {
     return { statusCode: 400, body: "Invalid JSON" };
   }
 
-  const { candidateData = {}, cvBase64, cvMimeType, roleTitle, client, consultant, date } = body;
+  const { candidateData = {}, cvBase64, cvMimeType, cvText, cvOriginalName, roleTitle, client, consultant, date } = body;
 
   try {
     const pdfDoc = await PDFDocument.create();
     await buildCoverPage(pdfDoc, candidateData, roleTitle, client, consultant, date);
-    await buildCVPages(pdfDoc, cvBase64, cvMimeType);
+    await buildCVPages(pdfDoc, cvBase64, cvMimeType, cvText, cvOriginalName);
 
     const pdfBytes  = await pdfDoc.save();
     const pdfBase64 = Buffer.from(pdfBytes).toString("base64");
