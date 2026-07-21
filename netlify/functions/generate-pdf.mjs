@@ -89,7 +89,7 @@ function drawFooterBand(page, fReg, W, M) {
   page.drawRectangle({ x: 0, y: 0, width: W, height: 28, color: NG_BLACK });
   page.drawRectangle({ x: 0, y: 28, width: W, height: 1.5, color: NG_YELLOW });
   sd(page, "NEXT GENERATION RECRUITMENT  |  CONFIDENTIAL", { x: M, y: 10, size: 6.5, font: fReg, color: NG_LGREY });
-  sd(page, "nextgenerationgroup.ie", { x: W - M - 90, y: 10, size: 6.5, font: fReg, color: NG_LGREY });
+  sd(page, "www.nextgeneration.ie", { x: W - M - 90, y: 10, size: 6.5, font: fReg, color: NG_LGREY });
 }
 
 // ─── Personal detail redaction ─────────────────────────────────────────────────
