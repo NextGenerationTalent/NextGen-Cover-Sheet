@@ -375,6 +375,7 @@ export const handler = async (event) => {
     }
 
     const cvBase64 = file.buffer.toString("base64");
+    const isPdf = file.mimetype === "application/pdf";
 
     return {
       statusCode: 200,
@@ -384,6 +385,10 @@ export const handler = async (event) => {
         cvBase64,
         cvMimeType:     file.mimetype,
         cvOriginalName: file.originalname,
+        // Word docs can't be embedded as-is into the final PDF (pdf-lib can only
+        // copy PDF pages or embed PNG/JPEG images). Send the extracted text back
+        // so generate-pdf.mjs can render it as plain text pages instead.
+        cvText: isPdf ? "" : cvText,
       }),
     };
   } catch (err) {
